@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>스테이크 타이머</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#1677ff" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+  <style>
+    :root{
+      --bg:#f4f7fb;
+      --card:#ffffff;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --primary:#1677ff;
+      --border:#e6edf7;
+      --shadow: 0 12px 28px rgba(15, 23, 42, .10);
+      --radius: 18px;
+      --danger:#ff3b30;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans KR", sans-serif;
+      background:var(--bg);
+      color:var(--ink);
+      padding:22px 14px 26px;
+    }
+    .wrap{max-width:520px; margin:0 auto;}
+    .title{
+      text-align:center;
+      font-weight:900;
+      font-size:34px;
+      color:var(--primary);
+      margin:10px 0 14px;
+      letter-spacing:-.5px;
+    }
+    .card{
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:18px;
+    }
+    .time{
+      text-align:center;
+      font-size:64px;
+      font-weight:900;
+      letter-spacing:1px;
+      margin:12px 0 10px;
+    }
+    .sub{
+      text-align:center;
+      color:var(--muted);
+      font-size:14px;
+      margin-bottom:10px;
+    }
+    .row{display:flex; gap:10px; margin-top:10px;}
+    button{
+      flex:1;
+      border:0;
+      border-radius:999px;
+      padding:14px 12px;
+      font-size:16px;
+      font-weight:850;
+      cursor:pointer;
+      -webkit-tap-highlight-color:transparent;
+      box-shadow:0 8px 16px rgba(22,119,255,.14);
+      transition:transform .05s ease, filter .15s ease;
+    }
+    button:active{transform:scale(.99);}
+    .b1{background:var(--primary); color:#fff;}
+    .b2{background:#eaf2ff; color:var(--primary); box-shadow:0 8px 16px rgba(15,95,224,.10);}
+    .b3{background:#ffe9e9; color:var(--danger); box-shadow:0 8px 16px rgba(255,59,48,.10);}
+
+    .pillRow{
+      display:flex;
+      justify-content:center;
+      margin-top:12px;
+    }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      background:#f1f5ff;
+      color:#2456d6;
+      border:1px solid #dbe7ff;
+      border-radius:999px;
+      padding:8px 12px;
+      font-size:13px;
+      font-weight:750;
+      user-select:none;
+    }
+    .dot{
+      width:10px; height:10px; border-radius:50%;
+      background:#94a3b8;
+    }
+    .dot.on{ background:#22c55e; }
+    .hint{margin-top:10px; text-align:center; color:var(--muted); font-size:12px;}
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="title">스테이크 타이머</div>
+
+    <div class="card">
+      <div class="time" id="time">00:00</div>
+      <div class="sub" id="status">대기 · 1:00 또는 1:30 눌러</div>
+
+      <div class="row">
+        <button class="b1" id="btn60">1:00</button>
+        <button class="b2" id="btn90">1:30</button>
+        <button class="b3" id="btnStop">정지</button>
+      </div>
+
+      <div class="pillRow">
+        <div class="pill" id="wakePill" title="지원 기기에서만 작동">
+          <span class="dot" id="wakeDot"></span>
+          화면 유지: <span id="wakeText">OFF</span>
+        </div>
+      </div>
+
+      <div class="hint">
+        ※ 끝나면 선택할 때까지 알람 반복(소리+진동) · 무음모드면 소리 안 날 수 있음
+      </div>
+    </div>
+  </div>
+
+<script>
+  // =========================
+  // PWA: Service Worker 등록
+  // =========================
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    });
+  }
+
+  // =========================
+  // UI
+  // =========================
+  const elTime = document.getElementById("time");
+  const elStatus = document.getElementById("status");
+  const wakeDot = document.getElementById("wakeDot");
+  const wakeText = document.getElementById("wakeText");
+
+  function fmt(ms){
+    ms = Math.max(0, ms);
+    const total = Math.ceil(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return String(m).padStart(2,"0") + ":" + String(s).padStart(2,"0");
+  }
+  function setStatus(t){ elStatus.textContent = t; }
+
+  // =========================
+  // 타이머 상태
+  // =========================
+  let tickId = null;
+  let endAt = 0;
+  let running = false;
+
+  // =========================
+  // 오디오(웹오디오 비프)
+  // =========================
+  let audioCtx = null;
+  function ensureAudio(){
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  }
+  function beep(ms=220, freq=880){
+    if (!audioCtx) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = "sine";
+    o.frequency.value = freq;
+
+    const t = audioCtx.currentTime;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.18, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + ms/1000);
+
+    o.connect(g);
+    g.connect(audioCtx.destination);
+    o.start();
+    o.stop(t + ms/1000 + 0.05);
+  }
+
+  // =========================
+  // 알람 반복(선택 전까지 계속)
+  // =========================
+  let alarmInterval = null;
+
+  function playAlarmOnce(){
+    // 삐삐삐
+    beep(220, 880);
+    setTimeout(() => beep(220, 880), 320);
+    setTimeout(() => beep(220, 880), 640);
+
+    // 진동(되면)
+    if (navigator.vibrate){
+      navigator.vibrate([200,100,200,100,200]);
+    }
+  }
+
+  function startAlarmLoop(){
+    stopAlarmLoop();     // 중복 방지
+    playAlarmOnce();     // 즉시 1번
+    alarmInterval = setInterval(playAlarmOnce, 2000); // 2초마다 반복
+  }
+
+  function stopAlarmLoop(){
+    if (alarmInterval){
+      clearInterval(alarmInterval);
+      alarmInterval = null;
+    }
+  }
+
+  // =========================
+  // Wake Lock (화면 안 꺼지게)
+  // =========================
+  let wakeLock = null;
+
+  function setWakeUI(on){
+    wakeText.textContent = on ? "ON" : "OFF";
+    wakeDot.classList.toggle("on", on);
+  }
+
+  async function requestWakeLock(){
+    if (!("wakeLock" in navigator)) {
+      setWakeUI(false);
+      return;
+    }
+    try{
+      wakeLock = await navigator.wakeLock.request("screen");
+      setWakeUI(true);
+
+      // 시스템/브라우저가 해제했을 때 UI 반영
+      wakeLock.addEventListener("release", () => {
+        wakeLock = null;
+        setWakeUI(false);
+      });
+    } catch (e){
+      wakeLock = null;
+      setWakeUI(false);
+    }
+  }
+
+  async function releaseWakeLock(){
+    try{
+      if (wakeLock){
+        await wakeLock.release();
+      }
+    } catch (e) {}
+    wakeLock = null;
+    setWakeUI(false);
+  }
+
+  // 탭이 다시 활성화되면(화면 복귀) 타이머 돌고 있으면 Wake Lock 재요청
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && running) {
+      requestWakeLock();
+    }
+  });
+
+  // =========================
+  // 동작
+  // =========================
+  function start(sec){
+    ensureAudio();
+    stopAlarmLoop();   // 알람 울리고 있으면 끔
+    stop(false);       // 기존 타이머 정리
+
+    running = true;
+    endAt = Date.now() + sec * 1000;
+    setStatus(`진행 중 · ${sec === 60 ? "1:00" : "1:30"}`);
+
+    // 화면 유지 켜기(지원되면)
+    requestWakeLock();
+
+    tick();
+    tickId = setInterval(tick, 150);
+  }
+
+  function tick(){
+    if (!running) return;
+    const left = endAt - Date.now();
+    elTime.textContent = fmt(left);
+
+    if (left <= 0){
+      // 끝: 알람 반복 + 자동 정지(대기)
+      running = false;
+      if (tickId){ clearInterval(tickId); tickId = null; }
+      endAt = 0;
+      elTime.textContent = "00:00";
+
+      setStatus("끝! · 선택할 때까지 알람 울림");
+      startAlarmLoop();
+
+      // 화면유지는 알람 울릴 때도 계속 켜두는 게 편해서 유지(원하면 여기서 releaseWakeLock()로 꺼도 됨)
+    }
+  }
+
+  function stop(showStopped=true){
+    running = false;
+    endAt = 0;
+    if (tickId){ clearInterval(tickId); tickId = null; }
+    elTime.textContent = "00:00";
+    if (showStopped) setStatus("정지");
+
+    stopAlarmLoop();
+    releaseWakeLock();
+  }
+
+  // =========================
+  // 버튼
+  // =========================
+  document.getElementById("btn60").addEventListener("click", () => start(60));
+  document.getElementById("btn90").addEventListener("click", () => start(90));
+  document.getElementById("btnStop").addEventListener("click", () => stop(true));
+
+  // 초기
+  setWakeUI(false);
+</script>
+</body>
+</html>
